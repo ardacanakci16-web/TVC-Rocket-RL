@@ -1,0 +1,392 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{cite}
+% \usepackage{microtype}
+
+\usepackage{tabularx}
+\usepackage{hyperref}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{\textbf{\Large Failure-Mode-Driven Reward Shaping and Handoff-Gate Calibration for Reinforcement Learning Control of a Thrust-Vector-Controlled Rocket}}
+
+\author{
+  \textbf{Cem \"Ozkurt}$^{1,*}$,
+  \textbf{Muhammed Emin Onay}$^{2}$,\\[1ex]
+  \textbf{Ey\"up Altu\u{g} Tun\c{c}}$^{2}$,
+  \textbf{Ahmet Kutay K\"u\c{c}\"ukler}$^{3}$,\\[1ex]
+  \textbf{Arda \c{C}anak\c{c}\i}$^{3}$\\[2ex]
+  \small $^{1}$Department of Data Science and Analytics, Faculty of Computer and Information Sciences,\\
+  \small Sakarya University, Sakarya, T\"urkiye\\[0.5ex]
+  \small $^{2}$Department of Computer Engineering, Faculty of Computer and Information Sciences,\\
+  \small Sakarya University, Sakarya, T\"urkiye\\[0.5ex]
+  \small $^{3}$Department of Computer Engineering, Sakarya University of Applied Sciences, Sakarya, T\"urkiye\\[0.5ex]
+  \small $^{*}$Corresponding author
+}
+
+\date{\vspace{-1ex}\small\textit{Target Journal: Acta Astronautica (Elsevier)}}
+
+\begin{document}
+
+\maketitle
+
+\section*{Highlights}
+\begin{itemize}
+    \item A systematic failure-mode-driven reward shaping protocol is established for TVC rocket climb control in MuJoCo.
+    \item Three structural reward defects---gradient-free attraction, saturating drift penalty, and missing directional velocity---are isolated and corrected.
+    \item Off-policy SAC achieves centimeter-accurate hover within 500k steps, substantially outperforming on-policy PPO under sparse terminal rewards.
+    \item Handoff-gate boundary calibration increases deterministic phase-transition success rate from 0\% to 95\% without vehicle redesign.
+\end{itemize}
+
+\begin{abstract}
+\noindent Learning the climb phase of a thrust-vector-controlled (TVC) rocket with reinforcement learning is difficult because the underactuated dynamics, tight phase-handoff tolerances, and precise lateral stabilization requirements jointly produce sparse success events. This study investigates the problem in a MuJoCo-based simulation through a systematic series of twelve controlled training runs, in which every run applies a single intervention targeting the quantified dominant failure mode of its predecessor. The on-policy series (PPO) diagnoses and corrects three structural reward defects---a narrow Gaussian attraction term without long-range gradient, a saturating drift penalty, and a missing directional lateral-velocity signal---reducing the dominant lateral-escape failure from 100\% to 10\% of episodes, yet producing no handoffs within 4 million cumulative steps. The off-policy series (SAC) learns a centimeter-accurate hover within 500 thousand steps, after which gate-isolation analysis reveals two boundary-design defects blocking the handoff: a reward attractor placed exactly on the altitude-gate threshold, and TVC quiescence thresholds incompatible with the servo dynamics. Relocating the attractor inside the gate region raises the handoff rate from 0/8 to 7/8 without any retraining, and calibrating the TVC gates yields a 95\% deterministic handoff success rate over 100 independent episodes. The results indicate that gradient coverage of the reward landscape and feasibility of task-defining thresholds dominate penalty-weight tuning in this task class, and provide a reproducible diagnosis protocol for similar control problems.
+\end{abstract}
+
+\vspace{1ex}
+\noindent \textbf{Keywords:} Thrust vector control; Deep reinforcement learning; Reward shaping; Soft actor-critic; Proximal policy optimization; Handoff gate calibration; MuJoCo.
+
+
+\section{Introduction}
+
+Vertically launched rockets that rely on thrust vector control (TVC) steer a single gimballed main engine to regulate altitude, attitude, and lateral position simultaneously. This underactuated configuration---closely related to balancing an inverted pendulum on a controllable thrust vector---poses two practical difficulties for reinforcement learning (RL): the reward function must supply learnable gradients in every task-critical dimension of the state space, and the algorithm must extract value from success events that are initially rare \cite{schulman2017ppo}, \cite{gaudet2020landing}. Although the theory of reward shaping is well established \cite{ng1999shaping}, systematic case studies documenting how reward-design defects are diagnosed and repaired in practice remain scarce, and recent analyses of reward hacking and specification gaming show that such defects are a primary source of RL failure in deployed systems \cite{amodei2016safety}, \cite{skalse2022gaming}.
+
+This paper targets the climb phase of a four-phase TVC flight chain (climb, flip, recovery, hover) simulated in MuJoCo \cite{todorov2012mujoco}. The climb phase must deliver the vehicle into a multi-condition handoff window---simultaneous altitude, attitude, position, velocity, and actuator-quiescence thresholds---from randomized initial states under actuator rate limits. Rather than tuning a single agent, we conduct a failure-mode-driven experiment series: after every training run, the dominant cause of episode failure is quantified from step logs, and the next run applies exactly one intervention aimed at that cause.
+
+The study addresses three research questions. RQ1: Which structural properties of a shaped reward---rather than its weight magnitudes---prevent learning regardless of penalty scale? RQ2: Under an identical corrected reward, how does the sample efficiency gap between on-policy (PPO) and off-policy (SAC) learning translate into task success? RQ3: To what extent do the task-defining handoff thresholds themselves determine learnability, and how can infeasible thresholds be detected and calibrated?
+
+The main contributions of this study are as follows:
+
+A failure-mode-driven experimental protocol is proposed and executed as a series of twelve controlled runs, each applying a single targeted intervention; all cross-run comparisons use reward-independent metrics (failure-mode composition, survival, terminal lateral deviation, handoff count).
+
+Three structural reward defects are diagnosed and corrected---gradient-free narrow Gaussian attraction, saturating distance penalty, and missing directional lateral-velocity signal---and their behavioral effect is verified: the dominant lateral-escape failure mode drops from 100\% to 10\% of episodes.
+
+A gate-isolation analysis is introduced that identifies two boundary-design defects: a reward attractor placed exactly on a gate threshold, and actuator quiescence thresholds infeasible under the servo dynamics; relocating the attractor alone raises handoff success from 0/8 to 7/8 with zero retraining.
+
+A calibrated-gate configuration is derived under which the champion SAC policy achieves a 95\% deterministic handoff success rate over 100 independent episodes, whereas PPO achieves none in 4 million cumulative steps, providing practical guidance on algorithm selection for sparse-success control tasks.
+
+The remainder of this paper is structured as follows. Section II reviews related work. Section III describes the simulation environment, the experimental protocol, and the diagnosed reward corrections. Section IV presents the results of the on-policy and off-policy series and the gate-calibration analysis. Section V discusses the findings and limitations, and Section VI concludes the paper.
+
+
+\section{Related works}
+
+Classical rocket landing guidance formulates powered descent as an online convex optimization problem, an approach proven in flight \cite{blackmore2016landing} but dependent on accurate dynamics models and disturbance estimates. Deep RL has been explored as a model-flexible alternative since the demonstration of human-level control from high-dimensional inputs \cite{mnih2015nature}; Gaudet et al. proposed deep-RL guidance policies for six-degree-of-freedom planetary landing \cite{gaudet2020landing}, and learned controllers have since reached deployment quality in legged locomotion through careful simulation training \cite{hwangbo2019robotics}. Within policy-gradient methods, PPO \cite{schulman2017ppo} is a widely used on-policy baseline owing to its clipped-objective stability, while SAC \cite{haarnoja2018sac} couples maximum entropy exploration with off-policy replay and consistently attains higher sample efficiency in continuous control.
+
+Reward shaping theory establishes that potential-based transformations preserve optimal policies \cite{ng1999shaping}, yet practical shaping terms are rarely potential-based, and recent work characterizes how misspecified rewards induce hacking and specification gaming \cite{amodei2016safety}, \cite{skalse2022gaming}. Curriculum learning \cite{bengio2009curriculum}, \cite{narvekar2020curriculum} addresses the complementary problem of unreachable task definitions by ordering task difficulty; domain randomization \cite{tobin2017randomization} similarly manipulates the task distribution for transfer. The present study connects these threads with an engineering-oriented protocol: the gradient coverage of shaping terms---whether a term produces usable derivatives in the state region the policy actually occupies---and the feasibility of task-defining thresholds are treated as first-class, measurable design dimensions, and both are diagnosed from episode telemetry before any capacity or budget scaling is attempted. To our knowledge, a run-by-run quantified failure-mode protocol of this form has not been documented for TVC rocket control.
+
+
+\section{Methodology}
+
+
+\subsection{Overall workflow}
+
+Fig. 1 shows the experimental workflow. Every training run produces per-episode telemetry; the distribution of episode-terminating causes is quantified; the dominant failure mode selects a single targeted intervention (reward-term redesign, specialization, exploration setting, or gate calibration); and the next run isolates that intervention. The protocol was executed as twelve runs: eight on-policy (R1-R8, PPO) and four analyzed off-policy runs (S1-S3, S5, SAC).
+
+
+\begin{figure}[!ht]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/image1.png}
+\caption{Failure-mode-driven experimental workflow. Each run applies exactly one intervention selected by the dominant failure mode of its predecessor.}
+\label{fig:workflow}
+\end{figure}
+
+
+\subsection{Simulated vehicle and physics engine}
+
+All experiments use a purpose-built model of a small single-engine TVC hopper rocket simulated in the MuJoCo physics engine (version 3.8.1), selected for its stable contact dynamics and its Newton solver's robustness under stiff leg-to-ground impacts. The vehicle is a rigid multi-body system attached to the world by a free joint (six degrees of freedom). Its airframe consists of a cylindrical main body of radius 0.06 m spanning a total stack height of 1.0 m, a spherical nose cap, and four landing legs modeled as capsules of radius 0.012 m splayed outward from the lower body, each terminating in a spherical foot of radius 0.025 m that forms the only intended ground-contact geometry. The airframe subtree has a total mass of 1.63 kg with a diagonal rotational inertia of (0.025, 0.025, 0.008) kg·m², i.e., the slender-body configuration in which pitch and yaw are easily disturbed and must be actively stabilized. Table I summarizes the physical and actuation parameters.
+
+
+\begin{table}[!ht]
+\centering
+\caption{Physical, actuation, and simulation parameters of the vehicle model.}
+\label{tab:vehicle_params}
+\vspace{1ex}
+\begin{tabular}{ll}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Physics engine / solver & MuJoCo 3.8.1, Newton solver \\
+Physics timestep / frame skip & 2 ms / 8 (control interval 16 ms, 62.5 Hz) \\
+Gravity & 9.81 m/s² \\
+Vehicle subtree mass & 1.63 kg \\
+Rotational inertia (diag.) & 0.025, 0.025, 0.008 kg·m² \\
+Airframe & cylinder r = 0.06 m, stack height 1.0 m \\
+Landing legs / feet & 4 capsules r = 0.012 m, spherical feet r = 0.025 m \\
+Maximum main thrust & 35.3 N (3.6 kgf) \\
+Thrust-to-weight ratio & 2.21 \\
+TVC gimbal deflection limit & $\pm$20$^{\circ}$ per axis (2 axes) \\
+TVC servo rate limit & 0.13 s per 60$^{\circ}$ (461.5$^{\circ}$/s = 8.06 rad/s) \\
+Gimbal joint damping & 0.1 N·m·s/rad per axis \\
+Episode horizon & 1,500 control steps (24 s) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\subsection{Actuation model}
+
+The vehicle is controlled exclusively through its gimballed main engine; there are no auxiliary thrusters or aerodynamic surfaces, which makes the system underactuated: lateral translation is achievable only by tilting the thrust vector, which simultaneously disturbs the attitude. The main motor produces a commanded thrust fraction of the 35.3 N maximum, applied at a thrust site at the engine nozzle and directed along the gimbal orientation, so that any deflection converts part of the thrust into lateral force and torque about the center of mass. The two-axis gimbal (yaw and pitch) is driven by position actuators with a hard deflection limit of $\pm$20$^{\circ}$ per axis. Critically, the servo dynamics are modeled explicitly: the commanded gimbal angle is tracked through a rate limiter of 60$^{\circ}$ per 0.13 s (8.06 rad/s peak), applied at every 2 ms physics step, so that instantaneous jumps of the thrust vector are physically impossible. This rate constant anchors the gate-feasibility analysis of Section IV-C.
+
+
+\subsection{Observation and action spaces}
+
+The policy observes a 31-dimensional vector composed of the 23 proprioceptive quantities listed in Table II and an 8-dimensional task-state encoding (active phase one-hot, flip progress, and phase-readiness flags) that gives the agent visibility of the flight-chain context. Target-relative position is expressed at the vehicle's bottom point rather than its center of mass, so that the altitude the agent perceives corresponds to the physically relevant landing-gear frame. The 3-dimensional continuous action commands the main-thrust fraction in [0, 1] and the two normalized gimbal targets in [-1, 1], which the environment scales to the $\pm$20$^{\circ}$ deflection range and passes through the servo rate limiter. Fig. 2 illustrates the complete agent-environment interface, including the observation-assembly and action-scaling chains and the 62.5 Hz sensing loop.
+
+
+\begin{figure}[!ht]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/image2.png}
+\caption{Agent-environment interface. The nine observation groups are assembled into the 31-dimensional state vector; the policy outputs 3 continuous actions.}
+\label{fig:interface}
+\end{figure}
+
+
+\begin{table}[!ht]
+\centering
+\caption{Composition of the observation and action spaces.}
+\label{tab:obs_action}
+\vspace{1ex}
+\begin{tabular}{lll}
+\toprule
+\textbf{Group} & \textbf{Dim.} & \textbf{Quantities and units} \\
+\midrule
+Target-relative position & 3 & bottom-point offset to target, x/y/z (m) \\
+Attitude & 4 & body quaternion (w, x, y, z) \\
+Altitude & 1 & bottom-point height above ground (m) \\
+Linear velocity & 3 & world-frame, x/y/z (m/s) \\
+Angular velocity & 3 & body rates, x/y/z (rad/s) \\
+TVC state & 4 & gimbal yaw/pitch angles (rad) and rates (rad/s) \\
+Foot contacts & 4 & binary contact flag per foot \\
+Motor state & 1 & commanded thrust fraction [0, 1] \\
+Task-state encoding & 8 & phase one-hot, flip progress, readiness flags \\
+Action (output) & 3 & thrust fraction [0, 1]; gimbal targets [-1, 1]² \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\subsection{Task definition, handoff gates, and termination}
+
+Episodes start from randomized altitudes (0.5-10 m) with a mixed reset profile (30\% legacy resets) and terminate in one of four ways: successful handoff, failure, physics violation, or timeout at 1,500 steps. The climb task succeeds when the nine-condition handoff window of Table III is satisfied simultaneously at a single control step. Lateral deviation beyond 6 m from the target column, any body-to-ground contact, and detected physics violations (non-physical velocity jumps) terminate the episode as failures. Because the reward function changes across runs by design, all cross-run comparisons use reward-independent metrics: failure-mode composition over the final training quarter, episode length, terminal lateral deviation, and handoff count.
+
+
+\begin{table}[!ht]
+\centering
+\caption{The nine handoff-gate conditions: original and calibrated.}
+\label{tab:handoff_gates}
+\vspace{1ex}
+\begin{tabular}{lll}
+\toprule
+\textbf{Gate condition} & \textbf{Original} & \textbf{Calibrated} \\
+\midrule
+Altitude z (bottom point) & $\ge$ 10.0 m & $\ge$ 10.0 m (attractor at 10.4 m) \\
+Upright attitude score & > 0.97 & > 0.97 \\
+Distance to target & $\le$ 1.0 m & $\le$ 1.0 m \\
+Linear speed & $\le$ 2.0 m/s & $\le$ 2.0 m/s \\
+Horizontal speed & $\le$ 2.0 m/s & $\le$ 2.0 m/s \\
+Vertical velocity & -2.0 … 2.0 m/s & -2.0 … 2.0 m/s \\
+Angular speed & $\le$ 0.50 rad/s & $\le$ 1.0 rad/s \\
+TVC deflection & $\le$ 0.10 rad & $\le$ 0.30 rad \\
+TVC joint speed & $\le$ 0.80 rad/s & $\le$ 6.0 rad/s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\subsection{Diagnosed reward defects and redesign}
+
+Analysis of runs R3-R6 identified three structural defects that made the lateral dimension of the reward landscape flat precisely where the policy operated (4-7 m from the target): (i) the center-attraction term exp(-(d/1.5)²) decays to approximately 0.001 at 4 m and produces no usable gradient; it was replaced by a two-scale form 0.6·exp(-(d/1.5)²) + 0.4·exp(-(d/4.5)²) that preserves near-center sharpness while extending gradient coverage; (ii) the drift penalty d/(d+2) saturates beyond 3 m (marginal change $\approx$ 0.05 per meter); a linear component 0.5·d/(d+2) + 0.5·min(d/4, 1.5) restores constant slope up to the termination boundary; (iii) no term encoded the direction of lateral motion, because all velocity-quality scores are multiplicative and collapse to zero at high lateral speed; an additive signed term tanh(v\_closing/2) rewards motion toward the target and penalizes motion away from it. Term activity in the 3-7 m band was verified before training (per-step contributions of -2.19, +0.03, and -1.67, respectively, versus $\approx$ 0 for all three defective forms).
+
+The off-policy series exposed two additional boundary-design defects. First, the altitude reward attractor coincided exactly with the altitude gate threshold (both 10.0 m): the hover equilibrium settles 0.23 m below the attractor, so the gate was never satisfied; the attractor was relocated inside the gate region (10.4 m). Second, the TVC quiescence thresholds (deflection $\le$ 0.10 rad, joint speed $\le$ 0.8 rad/s) were infeasible under active stabilization, which measurably requires a mean joint speed of 16 rad/s in hover; the thresholds were calibrated by gate-isolation testing to 0.30 rad and 6 rad/s. A termination-incentive inversion was also corrected: the success bonus (320) was smaller than the dense return of loitering to timeout ($\approx$ 5,400), so successful handoff was raised to 6,000 to dominate the loitering return.
+
+
+\subsection{Learning algorithms and hyperparameters}
+
+Two representative reinforcement learning paradigms are compared: Proximal Policy Optimization (PPO) \cite{schulman2017ppo}, an on-policy actor-critic method, and Soft Actor-Critic (SAC) \cite{haarnoja2018sac}, an off-policy, maximum-entropy actor-critic method. PPO updates the policy by maximizing a clipped surrogate objective
+
+L($\theta$) = Et [ min(rt($\theta$) At , clip(rt($\theta$), 1$-$$\varepsilon$, 1+$\varepsilon$) At ) ]	(1)
+
+where rt($\theta$) is the probability ratio between the new and old policies, At is the generalized advantage estimate (GAE), and $\varepsilon$ is the clipping range; the clipped term bounds the policy update per iteration and is the primary source of PPO's training stability \cite{schulman2017ppo}. SAC instead maximizes a maximum-entropy objective
+
+J($\pi$) = $\Sigma$t E [ r(st, at) + $\alpha$ H($\pi$(·|st)) ]	(2)
+
+where H denotes policy entropy and $\alpha$ is an automatically tuned temperature that balances reward maximization against exploration; the resulting stochastic actor is trained off-policy from a replay buffer using two clipped double Q-critics \cite{haarnoja2018sac}.
+
+PPO was selected as the on-policy baseline for its ubiquity and training stability in continuous-control benchmarks, and SAC as the off-policy contrast because replay retention of rare transitions directly addresses the sparse-success structure of the handoff task, consistent with the sample-efficiency advantage reported for maximum-entropy off-policy methods over on-policy baselines in continuous control \cite{haarnoja2018sac}. Both algorithms are trained with the Stable-Baselines3 implementations \cite{raffin2021sb3}, using the Adam optimizer and two-hidden-layer multilayer perceptron (MLP) policy and value/critic networks; reward weights follow the SAC-tuned dense configuration of the repository with the corrections of Section III-F. Table IV lists the complete hyperparameter configuration of both algorithms as used in the reported runs.
+
+
+\begin{table}[!ht]
+\centering
+\caption{Hyperparameters of the two learning algorithms (PPO and SAC).}
+\label{tab:hyperparams}
+\vspace{1ex}
+\begin{tabular}{lll}
+\toprule
+\textbf{Parameter} & \textbf{PPO (R-series)} & \textbf{SAC (S-series)} \\
+\midrule
+Policy / value-critic network & MLP 64-64 (tanh) & MLP 256-256 (ReLU) \\
+Optimizer & Adam & Adam \\
+Learning rate & 3$\times$10$^{-4}$ & 3$\times$10$^{-4}$ \\
+Discount factor $\gamma$ & 0.97; 0.99 (R5, R6+) & 0.97 \\
+Batch size & 256 & 256 \\
+Rollout length (n\_steps) & 2,048 & --- \\
+Epochs per update & 10 (SB3 default) & --- \\
+GAE $\lambda$ & 0.95 & --- \\
+Clip range $\varepsilon$ & 0.2 & --- \\
+Value-function coeff. & 0.5 (SB3 default) & --- \\
+Max. gradient norm & 0.5 (SB3 default) & --- \\
+Entropy coefficient & 0 (R1-R5, R7-R8); 0.01 (R6); 0.003 (calibration runs) & auto, target 0.02 (auto\_0.02) \\
+Replay buffer size & --- & 3$\times$10$^5$ transitions \\
+Warm-up steps & --- & 5$\times$10³ \\
+Soft target update $\tau$ & --- & 0.005 \\
+Train / gradient steps & --- & 1 gradient step per env. step \\
+Device & CPU (~1,000 steps/s) & GPU RTX 4060 (~150 steps/s) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Unlisted parameters retain the Stable-Baselines3 default values for the corresponding algorithm. The PPO entropy coefficient and discount factor were the only hyperparameters varied across the R-series runs, each change being one of the single targeted interventions of the protocol in Section III-A; all SAC runs (S1-S5) share the configuration of Table IV.
+
+
+\subsection{Reproducibility}
+
+Software: Python 3.10.12, Stable-Baselines3 2.8.0, MuJoCo 3.8.1, Gymnasium 1.2.3, PyTorch 2.12 (CUDA 13.0). Hardware: 12-core CPU and an NVIDIA RTX 4060 Laptop GPU (8 GB). Environment resets use the framework's seeded generator; deterministic evaluations use fixed seed ranges (1000-1049 for model comparisons, 5000-5099 for the final 100-episode evaluation) so that all policies face identical initial conditions. Per-episode telemetry of all twelve runs, evaluation scripts, and the trained champion policy are archived with the project.
+
+
+\subsection{Evaluation metrics}
+
+The primary endpoint is the deterministic handoff success rate over independent evaluation episodes under a stated gate configuration, with the episode count and the exact thresholds always reported jointly. Secondary metrics are the median time-to-handoff, failure-mode composition, terminal lateral deviation, and gate-condition satisfaction rates measured per simulation step.
+
+
+\section{Analysis and results}
+
+
+\subsection{On-policy series: Reward redesign}
+
+Table V summarizes all twelve runs. The sparse-reward run R1 confirms the baseline pathology: every episode terminates at the uniform failure penalty and no learning occurs. Dense shaping (R2) and climb specialization with warm-starting (R3) solve altitude control but concentrate failures in lateral escape (87-96\%). Runs R4-R5 demonstrate that penalty magnitude alone is ineffective: an 18-fold increase of the drift weight leaves behavior unchanged while the policy standard deviation collapses from 0.39 to 0.14, removing the exploratory actions that a corrective maneuver would require. Run R6 shows the complementary failure: with exploration preserved by an entropy bonus, the noisy TVC commands destabilize flight (lateral speeds up to 13 m/s).
+
+
+\begin{table}[!ht]
+\centering
+\caption{The twelve-run experiment series with reward-independent outcome metrics.}
+\label{tab:runs_results}
+\vspace{1ex}
+\begin{tabular}{llllll}
+\toprule
+\textbf{Run} & \textbf{Intervention} & \textbf{Steps} & \textbf{Lateral escape} & \textbf{Surface contact} & \textbf{Handoffs} \\
+\midrule
+R1 & PPO, sparse reward & 500k & 33\% & 50\% & 0 \\
+R2 & Dense reward shaping & 500k & 39\% & 57\% & 0 \\
+R3 & Climb specialist + warm start & +500k & 87\% & 11\% & 0 \\
+R4 & Drift penalty $\times$5 & +500k & 96\% & 2\% & 0 \\
+R5 & Penalty $\times$18 + $\gamma$ = 0.99 & +500k & 100\% & 0\% & 0 \\
+R6 & From scratch + entropy 0.01 & 500k & 66\% & 32\% & 0 \\
+R7 & Redesigned reward (Sec. III-C) & 500k & 10\% & 89\% & 0 \\
+R8 & R7 + 1M continuation & +1M & 25\% & 75\% & 0 \\
+S1 & SAC + redesigned reward (GPU) & 500k & 1\% & 0\%* & 0 \\
+S2 & S1 + heavy TVC penalty & +500k & 0\% & 80\% & 0 \\
+S3 & S1 + balanced TVC penalty & +500k & 0\% & 2\%* & 0 \\
+S5 & S3 + attractor fix + calib. gates & +500k & 12\% & 57\% & 423 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+* In S1 and S3, ~98\% of episodes end by crash-free timeout (sustained hover).
+
+The redesigned reward (R7) changes the dominant failure mode for the first time, as shown in Fig. 3: lateral escape falls from 100\% to 10\% of episodes and the terminal lateral deviation from 6.7 m to 2.5 m (Fig. 4). The continuation R8 consolidates flight quality (mean episode reward +238, survival 287 steps) but produces no handoffs: PPO repeatedly converges to a low-altitude survival attractor, and its on-policy sampling cannot retain the rare trajectories that reach the handoff window.
+
+
+\begin{figure}[!ht]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/image3.png}
+\caption{Episode-outcome composition per run (final training quarter). The reward redesign (R7) shifts failures from lateral escapes to velocity escapes.}
+\label{fig:composition}
+\end{figure}
+
+
+\begin{figure}[!ht]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/image4.png}
+\caption{Terminal lateral deviation during training (rolling mean). The redesigned reward keeps the vehicle within lateral containment throughout.}
+\label{fig:lateral_dev}
+\end{figure}
+
+
+\subsection{Off-policy series: Hover quality and gate analysis}
+
+Under the identical corrected reward, SAC (S1) reaches a flight quality unattained by the entire PPO series within 500 thousand steps: crash-free hover at 9.8 m altitude, 0.25-0.40 m from the target, upright score 0.98, sustained to the episode time limit (Fig. 5). Nevertheless the handoff count is zero. Per-step gate analysis explains why: seven of the nine gate conditions are satisfied in ~99\% of steps, while (i) the altitude gate (z $\ge$ 10.0 m) is never satisfied---the reward attracts the vehicle to exactly 10.0 m and the hover equilibrium settles at 9.77 m, 0.23 m below the threshold (a boundary-attractor conflict); and (ii) the TVC quiescence gates are incompatible with active stabilization, which requires a measured mean joint speed of 16 rad/s against a 0.8 rad/s threshold. The counter-experiment S2 confirms the trade-off: heavy servo penalties calm the actuator to 2 rad/s but destroy the hover skill entirely (upright score -0.10), and the balanced setting S3 restores hover without changing servo behavior.
+
+
+\begin{figure}[!ht]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/image5.png}
+\caption{Step-level telemetry of the S1 hover policy: smooth ascent and stable hover (top), centering within $\pm 0.05$\,m (middle), TVC gimbal angles (bottom).}
+\label{fig:telemetry}
+\end{figure}
+
+
+\subsection{Boundary corrections, handoff emergence, and gate sensitivity}
+
+Relocating the reward attractor inside the gate region (10.0 $\rightarrow$ 10.4 m) raises the handoff rate of the unmodified S3 policy from 0/8 to 7/8 episodes with zero additional training, isolating the boundary-attractor conflict as the causal blocker. With the calibrated TVC gates of Section III-F, training run S5 produces 423 handoffs and stochastic handoff rates near 30\% (Fig. 6a). Model selection across the series identifies S3 as the champion under deterministic evaluation.
+
+The final evaluation over 100 independent episodes yields a 95\% handoff success rate (median time-to-handoff 7.0 s; residual failures: 2 timeouts, 2 physics violations, 1 lateral escape). Gate-sensitivity analysis (Fig. 6b) shows the same policy evaluates to 95\%, 10\%, and 0\% under calibrated, intermediate, and original thresholds, respectively: with a servo rate constant implying a peak rate of $\approx$ 8 rad/s, the original 0.8 rad/s quiescence threshold is assessed as practically unreachable in this actively stabilized regime and attainable only, if at all, with the 50-million-step GPU-native training pipeline for which it was tuned.
+
+
+\begin{figure}[!ht]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/image6.png}
+\caption{(a) Emergence of handoffs during S5 training under calibrated gates; (b) Terminal lateral deviation distribution.}
+\label{fig:handoff_emergence}
+\end{figure}
+
+
+\section{Discussion}
+
+Regarding RQ1, the decisive properties of the shaped reward were functional forms rather than weights. Where the attraction Gaussian and the saturating drift ratio produced no derivative in the occupied state region, an 18-fold weight increase (R4-R5) only shifted the reward level; the same-magnitude formal correction (R7) changed behavior within a single run. This extends the practical reading of shaping theory \cite{ng1999shaping}: beyond preserving optimality, a shaping term must be audited for gradient coverage, and the audit is cheap---per-step term contributions in the policy's operating region reveal dead terms before any training is spent. The interaction with exploration collapse mirrors observations in the reward-hacking literature \cite{amodei2016safety}, \cite{skalse2022gaming}: corrective signals applied after the policy distribution has narrowed (standard deviation 0.14) cannot be sampled into effect.
+
+Regarding RQ2, the on-policy/off-policy contrast was categorical rather than gradual: PPO produced zero handoffs in 4 million cumulative steps under the same reward with which SAC reached centimeter-accurate hover in 500 thousand steps and 95\% handoff success after gate calibration. We attribute this primarily to replay retention of rare success transitions---each +6,000 handoff transition is revisited by SAC's updates, whereas PPO discards it after one policy iteration---consistent with the sample-efficiency ordering reported for continuous control \cite{haarnoja2018sac}. The practical implication for sparse-success control tasks is to prefer off-policy learners before scaling budget.
+
+Regarding RQ3, the gate-isolation experiment demonstrates that task thresholds are design variables with measurable feasibility. Two defect classes emerged: a boundary-attractor conflict, repaired by a 4\% relocation of the reward target with zero retraining cost, and actuator-quiescence thresholds violating the servo's physical rate regime. The same trained policy evaluated anywhere between 0\% and 95\% depending solely on threshold calibration---a caution for benchmark comparability, since reported success rates are meaningful only jointly with the gate definition. The termination-incentive inversion (success bonus below the loitering return) is a further design check we recommend auditing whenever dense shaping coexists with success-triggered termination.
+
+This study has limitations. All results derive from a single simulation environment and single-seed runs; the sequential single-intervention design supports causal attribution per step but not full factorial interaction analysis; the 95\% headline is reported under calibrated rather than original gates, with the original-gate result (0\%) disclosed alongside; and sim-to-real transfer is out of scope. Multi-seed replication is the most important robustness step before publication-grade generalization claims.
+
+
+\section{Conclusion}
+
+This work set out to learn the climb phase of a thrust-vector-controlled rocket with reinforcement learning and to document, run by run, why learning fails and what repairs it. The failure-mode-driven protocol achieved its aim: the final policy hands the vehicle off to the next flight phase with high reliability, and every intervention along the way is attributable to a quantified cause.
+
+Three design principles emerged. Reward terms must be audited for gradient coverage in the state region the policy actually occupies, because dead terms are immune to weight tuning. The timing of reward corrections matters as much as their content, because corrections applied after exploration collapse cannot be sampled into effect. And the thresholds that define task success are themselves design variables whose feasibility against actuator physics must be verified, because an infeasible gate silently converts a solvable task into an unsolvable one.
+
+Future work will proceed along three concrete lines: multi-seed replication of the champion configuration to attach confidence intervals to the headline result; extension of the specialist-and-calibration protocol to the remaining flight phases and their composition into the full chain; and progressive gate re-tightening under the GPU-native vectorized pipeline to test whether the original quiescence thresholds become reachable at larger interaction budgets.
+
+
+\section*{CRediT authorship contribution statement}
+\textbf{Cem \"Ozkurt:} Conceptualization, Methodology, Software, Investigation, Writing -- original draft, Writing -- review \& editing. \textbf{Muhammed Emin Onay:} Software, Investigation, Validation. \textbf{Ey\"up Altu\u{g} Tun\c{c}:} Investigation, Data Curation, Validation. \textbf{Ahmet Kutay K\"u\c{c}\"ukler:} Software, Investigation, Validation. \textbf{Arda \c{C}anak\c{c}\i:} Conceptualization, Methodology, Software, Supervision, Writing -- review \& editing.
+
+\section*{Declaration of generative AI and AI-assisted technologies}
+
+During the preparation of this work, the authors used an AI assistant (Claude, Anthropic) for experiment orchestration, data analysis, and drafting of the manuscript text. The authors reviewed and edited the content and take full responsibility for the content of the publication.
+
+
+\section*{Declaration of competing interest}
+
+The authors declare no competing financial interests or personal relationships that could have appeared to influence the work reported in this paper.
+
+
+\section*{Data availability statement}
+
+Per-episode telemetry of all twelve training runs, evaluation scripts, figure generation code, and the trained champion policy are available from the corresponding author upon reasonable request.
+
+
+\bibliographystyle{unsrt}
+\bibliography{references}
+
+\end{document}
